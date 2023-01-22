@@ -3,6 +3,7 @@
 package siwa
 
 import (
+	"context"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -26,6 +27,14 @@ var (
 
 const expectedIssuer = "https://appleid.apple.com"
 
+type RealUserStatus int
+
+const (
+	Unsupported RealUserStatus = 0
+	Unknown     RealUserStatus = 1
+	LikelyReal  RealUserStatus = 2
+)
+
 type IdentityToken struct {
 	// Header information
 	KeyID string
@@ -40,7 +49,7 @@ type IdentityToken struct {
 	Email          string
 	EmailVerified  bool
 	IsPrivateEmail bool
-	RealUserStatus int
+	RealUserStatus RealUserStatus
 	NonceSupported bool
 	Nonce          string
 
@@ -136,7 +145,7 @@ func NewIdentityToken(token string) (*IdentityToken, error) {
 		Email:          body.Email,
 		EmailVerified:  emailVerified,
 		IsPrivateEmail: isPrivateEmail,
-		RealUserStatus: body.RealUserStatus,
+		RealUserStatus: RealUserStatus(body.RealUserStatus),
 		NonceSupported: nonceSupported,
 		Nonce:          body.Nonce,
 
@@ -147,13 +156,14 @@ func NewIdentityToken(token string) (*IdentityToken, error) {
 }
 
 func (t *IdentityToken) verifyWithoutTimeCheck(
+	ctx context.Context,
 	store *KeyStore,
 	audience string,
 	nonce string,
 ) error {
 	key, ok := store.GetPublicKey(t.KeyID, t.Alg, "sig")
 	if !ok {
-		ok, err := store.MaybeRefreshPublicKeys(AuthKeysFetchFrequency)
+		ok, err := store.MaybeRefreshPublicKeys(ctx, AuthKeysFetchFrequency)
 		if !ok {
 			if err != nil {
 				return fmt.Errorf("cannot refresh public keys: %w", err)
@@ -198,8 +208,13 @@ func (t *IdentityToken) verifyWithoutTimeCheck(
 	return nil
 }
 
-func (t *IdentityToken) Verify(store *KeyStore, audience, nonce string) error {
-	if err := t.verifyWithoutTimeCheck(store, audience, nonce); err != nil {
+func (t *IdentityToken) Verify(
+	ctx context.Context,
+	store *KeyStore,
+	audience string,
+	nonce string,
+) error {
+	if err := t.verifyWithoutTimeCheck(ctx, store, audience, nonce); err != nil {
 		return err
 	}
 	if t.Expires.Before(time.Now()) {

@@ -3,9 +3,11 @@
 package siwa
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"io/ioutil"
 	"math/big"
 	"net/http"
@@ -57,33 +59,50 @@ type KeyStore struct {
 	lastRefresh      time.Time
 	lastRefreshError error
 	refreshing       bool
+	delegate         interface{}
 }
 
 func NewKeyStore() *KeyStore {
 	return &KeyStore{}
 }
 
-func (c *KeyStore) RefreshPublicKeys() (err error) {
-	c.lock.Lock()
-	if c.refreshing {
-		defer c.lock.Unlock()
-		for c.refreshing {
-			c.cond.Wait()
-		}
-		return c.lastRefreshError
+func (s *KeyStore) SetDelegate(delegate interface{}) {
+	s.delegate = delegate
+}
+
+func (s *KeyStore) NewRequestWithContext(
+	ctx context.Context,
+	method string,
+	url string,
+	body io.Reader,
+) (*http.Request, error) {
+	if p, ok := s.delegate.(HTTPRequestProvider); ok {
+		return p.NewRequestWithContext(ctx, method, url, body)
 	}
-	c.refreshing = true
-	c.lock.Unlock()
+	return http.NewRequestWithContext(ctx, method, url, body)
+}
+
+func (s *KeyStore) RefreshPublicKeys(ctx context.Context) (err error) {
+	s.lock.Lock()
+	if s.refreshing {
+		defer s.lock.Unlock()
+		for s.refreshing {
+			s.cond.Wait()
+		}
+		return s.lastRefreshError
+	}
+	s.refreshing = true
+	s.lock.Unlock()
 
 	defer func() {
-		c.lock.Lock()
-		c.lastRefreshError = err
-		c.refreshing = false
-		c.cond.Broadcast()
-		c.lock.Unlock()
+		s.lock.Lock()
+		s.lastRefreshError = err
+		s.refreshing = false
+		s.cond.Broadcast()
+		s.lock.Unlock()
 	}()
 
-	req, err := http.NewRequest(http.MethodGet, authKeysURL, nil)
+	req, err := s.NewRequestWithContext(ctx, http.MethodGet, authKeysURL, nil)
 	if err != nil {
 		return err
 	}
@@ -106,26 +125,29 @@ func (c *KeyStore) RefreshPublicKeys() (err error) {
 		return err
 	}
 
-	c.lock.Lock()
-	c.keys = jsonKeys.Keys
-	c.lastRefresh = time.Now()
-	c.lock.Unlock()
+	s.lock.Lock()
+	s.keys = jsonKeys.Keys
+	s.lastRefresh = time.Now()
+	s.lock.Unlock()
 
 	return
 }
 
-func (c *KeyStore) MaybeRefreshPublicKeys(freq time.Duration) (bool, error) {
-	if time.Now().Sub(c.lastRefresh) < freq {
+func (s *KeyStore) MaybeRefreshPublicKeys(
+	ctx context.Context,
+	freq time.Duration,
+) (bool, error) {
+	if time.Now().Sub(s.lastRefresh) < freq {
 		return false, nil
 	}
-	return true, c.RefreshPublicKeys()
+	return true, s.RefreshPublicKeys(ctx)
 }
 
-func (c *KeyStore) GetPublicKey(kid, alg, use string) (*rsa.PublicKey, bool) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
+func (s *KeyStore) GetPublicKey(kid, alg, use string) (*rsa.PublicKey, bool) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
 
-	for _, key := range c.keys {
+	for _, key := range s.keys {
 		if key.KeyID != kid {
 			continue
 		}
