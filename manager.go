@@ -328,10 +328,20 @@ func (m *Manager) ProcessRevokeResponse(
 	ctx context.Context,
 	resp *http.Response,
 ) error {
+	// Note it's the caller's responsibility to close resp.Body
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
 	if resp.StatusCode != http.StatusOK {
+		var r ErrorResponse
+		if err = json.Unmarshal(b, &r); err == nil {
+			return r
+		}
 		return ErrInvalidResponse
 	}
-	// Note it's the caller's responsibility to close resp.Body
+
 	return nil
 }
 
