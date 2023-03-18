@@ -4,21 +4,12 @@ package siwa
 
 import (
 	"context"
-	"crypto"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
-	"strings"
 	"time"
 )
 
 var (
-	ErrUnknownKey      = errors.New("unknown public key")
-	ErrMalformedToken  = errors.New("malformed token")
 	ErrInvalidNonce    = errors.New("invalid nonce")
 	ErrInvalidIssuer   = errors.New("invalid issuer")
 	ErrInvalidAudience = errors.New("invalid audience")
@@ -36,11 +27,6 @@ const (
 )
 
 type IdentityToken struct {
-	// Header information
-	KeyID string
-	Alg   string
-
-	// Body information
 	Issuer         string
 	Audience       string
 	Expires        time.Time
@@ -53,8 +39,8 @@ type IdentityToken struct {
 	NonceSupported bool
 	Nonce          string
 
-	token     []byte
-	signature []byte
+	token *JWT
+	_     struct{}
 }
 
 func parseBool(v interface{}) (bool, error) {
@@ -68,39 +54,6 @@ func parseBool(v interface{}) (bool, error) {
 }
 
 func NewIdentityToken(token string) (*IdentityToken, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, ErrMalformedToken
-	}
-
-	var tokenBytes []byte
-	if x := strings.LastIndexByte(token, '.'); x != -1 {
-		tokenBytes = ([]byte)(token[:x])
-	}
-
-	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, ErrMalformedToken
-	}
-	bodyBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, ErrMalformedToken
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return nil, ErrMalformedToken
-	}
-
-	// Decode the header. It tells us which RSA PublicKey to use to verify
-	// the identity token.
-	var header struct {
-		KeyID string `json:"kid"`
-		Alg   string `json:"alg"`
-	}
-	if err = json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, ErrMalformedToken
-	}
-
 	// This contains only Apple documented fields. There may be others
 	// present, but we will pay them no mind.
 	var body struct {
@@ -116,8 +69,9 @@ func NewIdentityToken(token string) (*IdentityToken, error) {
 		NonceSupported interface{} `json:"nonce_supported"`
 		Nonce          string      `json:"nonce"`
 	}
-	if err = json.Unmarshal(bodyBytes, &body); err != nil {
-		return nil, ErrMalformedToken
+	j, err := DecodeJWT(token, &body)
+	if err != nil {
+		return nil, err
 	}
 
 	emailVerified, err := parseBool(body.EmailVerified)
@@ -134,9 +88,6 @@ func NewIdentityToken(token string) (*IdentityToken, error) {
 	}
 
 	t := IdentityToken{
-		KeyID: header.KeyID,
-		Alg:   header.Alg,
-
 		Issuer:         body.Issuer,
 		Audience:       body.Audience,
 		Expires:        time.Unix(body.Expires, 0),
@@ -148,9 +99,7 @@ func NewIdentityToken(token string) (*IdentityToken, error) {
 		RealUserStatus: RealUserStatus(body.RealUserStatus),
 		NonceSupported: nonceSupported,
 		Nonce:          body.Nonce,
-
-		token:     tokenBytes,
-		signature: signature,
+		token:          j,
 	}
 	return &t, nil
 }
@@ -161,27 +110,7 @@ func (t *IdentityToken) verifyWithoutTimeCheck(
 	audience string,
 	nonce string,
 ) error {
-	key, ok := store.GetPublicKey(t.KeyID, t.Alg, "sig")
-	if !ok {
-		ok, err := store.MaybeRefreshPublicKeys(ctx, AuthKeysFetchFrequency)
-		if !ok {
-			if err != nil {
-				return fmt.Errorf("cannot refresh public keys: %w", err)
-			}
-			return ErrUnknownKey
-		}
-		key, ok = store.GetPublicKey(t.KeyID, t.Alg, "sig")
-		if !ok {
-			return ErrUnknownKey
-		}
-	}
-
-	h := sha256.New()
-	h.Write(t.token)
-	hashed := h.Sum(nil)
-
-	err := rsa.VerifyPKCS1v15(key, crypto.SHA256, hashed, t.signature)
-	if err != nil {
+	if err := t.token.Verify(ctx, store); err != nil {
 		return err
 	}
 

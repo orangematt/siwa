@@ -363,3 +363,86 @@ func (m *Manager) RevokeToken(
 
 	return m.ProcessRevokeResponse(ctx, resp)
 }
+
+const (
+	eventTypeEmailDisabled  = "email-disabled"
+	eventTypeEmailEnabled   = "email-enabled"
+	eventTypeConsentRevoked = "consent-revoked"
+	eventTypeAccountDelete  = "account-delete"
+)
+
+type EmailDisabledDelegate interface {
+	DisableEmailForwarding(subject, email string, isPrivateEmail bool)
+}
+
+type EmailEnabledDelegate interface {
+	EnableEmailForwarding(subject, email string, isPrivateEmail bool)
+}
+
+type ConsentRevoked interface {
+	RevokeConsent(subject string)
+}
+
+type AccountDelete interface {
+	DeleteAccount(subject string)
+}
+
+func (m *Manager) ProcessChanges(ctx context.Context, b []byte) error {
+	var body struct {
+		Payload string `json:"payload"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		return err
+	}
+
+	type event struct {
+		Type           string    `json:"type"`
+		Subject        string    `json:"sub"`
+		Email          string    `json:"email"`
+		IsPrivateEmail bool      `json:"is_private_email"`
+		EventTime      time.Time `json:"event_time"`
+	}
+	var change struct {
+		Issuer   string    `json:"iss"`
+		Audience string    `json:"aud"`
+		IssuedAt time.Time `json:"iat"`
+		Events   event     `json:"events"`
+	}
+	jwt, err := DecodeJWT(body.Payload, &change)
+	if err != nil {
+		return err
+	}
+	if err = jwt.Verify(ctx, m.keyStore); err != nil {
+		return err
+	}
+	if change.Issuer != expectedIssuer {
+		return ErrInvalidIssuer
+	}
+	if change.Audience != m.bundleID {
+		return ErrInvalidAudience
+	}
+
+	e := change.Events
+	switch e.Type {
+	case eventTypeEmailDisabled:
+		if delegate, ok := m.delegate.(EmailDisabledDelegate); ok {
+			delegate.DisableEmailForwarding(e.Subject, e.Email,
+				e.IsPrivateEmail)
+		}
+	case eventTypeEmailEnabled:
+		if delegate, ok := m.delegate.(EmailEnabledDelegate); ok {
+			delegate.EnableEmailForwarding(e.Subject, e.Email,
+				e.IsPrivateEmail)
+		}
+	case eventTypeConsentRevoked:
+		if delegate, ok := m.delegate.(ConsentRevoked); ok {
+			delegate.RevokeConsent(e.Subject)
+		}
+	case eventTypeAccountDelete:
+		if delegate, ok := m.delegate.(AccountDelete); ok {
+			delegate.DeleteAccount(e.Subject)
+		}
+	}
+
+	return nil
+}
